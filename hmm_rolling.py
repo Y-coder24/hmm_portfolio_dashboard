@@ -185,15 +185,17 @@ states = states.loc[common_index]
 returns["state"] = states
 
 def get_weights(mu_vec, cov):
-    # Closed-form solution: w ∝ Σ⁻¹ μ
     inv_cov = np.linalg.pinv(cov)
     w = inv_cov @ mu_vec
 
-    # Long-only constraint
     w = np.maximum(w, 0)
 
-    # Normalize weights
-    return w / w.sum() if w.sum() > 0 else np.ones_like(w)/len(w)
+    if np.isnan(w).any() or w.sum() == 0:
+        return np.ones_like(w) / len(w)
+
+    return w / w.sum()
+
+
 # =========================
 # Mean-Variance Optimization (MVO)
 # =========================
@@ -202,17 +204,12 @@ def get_weights(mu_vec, cov):
 # =========================
 # Use rolling / expanding window to ensure only past data is used
 
-window = 252  # 1-year lookback
-# =========================
-# Stable MVO + Transaction Cost
-# =========================
-
 window = 252
-cost_rate = 0.001  # 10 bps per trade
+cost_rate = 0.001
 
 weights = []
 valid_index = []
-prev_w = np.ones(len(selected)) / len(selected)  # 初始均匀权重
+prev_w = np.ones(len(selected)) / len(selected)
 
 turnover_list = []
 
@@ -226,24 +223,33 @@ for i in range(window, len(returns)):
     if len(hist_state) < 20:
         hist_state = hist
 
-    # ===== μ（降低噪声）
+    # μ（降噪）
     mu_vec = hist_state[selected].mean().values
-    mu_vec = mu_vec * 0.5   # shrinkage（关键！）
+    mu_vec = mu_vec * 0.5
 
-    # ===== Σ
+    # Σ
     cov_mat = np.cov(hist[selected].T)
 
-    # ===== MVO
+    # MVO
     w = get_weights(mu_vec, cov_mat)
 
-    # ===== weight cap（防止极端）
-    w = np.clip(w, 0, 0.4)
-    w = w / w.sum()
+    # fallback（关键）
+    if np.isnan(w).any() or np.isinf(w).any():
+        w = prev_w
 
-    # ===== 平滑（核心）
+    # weight cap
+    w = np.clip(w, 0, 0.4)
+
+    # normalization（安全）
+    if w.sum() == 0:
+        w = prev_w
+    else:
+        w = w / w.sum()
+
+    # smoothing
     w = 0.8 * prev_w + 0.2 * w
 
-    # ===== turnover（交易成本）
+    # turnover
     turnover = np.sum(np.abs(w - prev_w))
     turnover_list.append(turnover)
 
@@ -252,27 +258,18 @@ for i in range(window, len(returns)):
 
     prev_w = w
 
-weights = pd.DataFrame(
-    weights,
-    index=valid_index,
-    columns=selected
-)
+# DataFrame
+weights = pd.DataFrame(weights, index=valid_index, columns=selected)
 
+# clean
+weights = weights.clip(lower=0)
+weights = weights.div(weights.sum(axis=1), axis=0)
+weights = weights.fillna(1/len(weights.columns))
+
+# align returns
 returns = returns.loc[valid_index]
 
 turnover_series = pd.Series(turnover_list, index=valid_index)
-
-# Convert to DataFrame
-weights = pd.DataFrame(
-    weights,
-    index=valid_index,
-    columns=selected
-)
-
-# Align returns
-returns = returns.loc[valid_index]
-
-
 
 
 # =========================

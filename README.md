@@ -20,7 +20,10 @@ The model identifies latent market regimes (bull vs bear) using SPY returns and 
 - State-conditioned expected return estimation  
 - Stability enhancements including shrinkage, weight constraints, and smoothing  
 - Transaction cost modeling based on portfolio turnover  
-- Interactive Streamlit dashboard for real-time visualization  
+- Interactive Streamlit dashboard for real-time visualization
+- LLM-powered explainability layer (OpenAI API) generating natural-language 
+  portfolio commentary and regime retrospectives  
+- Interactive Q&A interface for querying backtest results in natural language
 
 ---
 
@@ -68,6 +71,20 @@ To address instability in MVO:
 \text{cost} = \text{turnover} \times \text{cost rate}
 \]
 
+### 5. LLM-Based Explainability Layer
+To make quantitative outputs more interpretable, structured backtest results 
+(regime states, Sharpe/drawdown metrics, position weights, historical regime 
+segments) are passed to an LLM (OpenAI API) to generate:
+- A natural-language summary of current portfolio state and risk profile  
+- A retrospective comparison of portfolio performance across the longest 
+  historical bull and bear regimes  
+- An interactive Q&A feature allowing users to ask follow-up questions about 
+  the backtest results  
+
+**Design note:** Only pre-computed structured summaries (not raw price series) 
+are passed to the LLM, and prompts explicitly constrain the model to reason 
+only from the provided data — reducing hallucination risk and keeping token 
+costs low.
 ---
 
 ## Results
@@ -88,7 +105,16 @@ Compared to a SPY buy-and-hold benchmark:
 - SPY price with inferred market regimes  
 - Time-varying portfolio weights  
 - Drawdown visualization  
-- Performance metrics (Return, Volatility, Sharpe, Max Drawdown)  
+- Performance metrics (Return, Volatility, Sharpe, Max Drawdown)
+- AI-generated portfolio commentary and regime retrospective  
+- Natural-language Q&A on backtest results
+
+---
+
+## Performance Notes
+The Q&A feature is isolated using Streamlit's `@st.fragment` decorator, so 
+that submitting a question does not trigger a full re-run of the HMM training 
+and MVO backtest pipeline — only the LLM call and its surrounding UI update.
 
 ---
 
@@ -100,7 +126,8 @@ Compared to a SPY buy-and-hold benchmark:
 - scikit-learn  
 - hmmlearn  
 - matplotlib  
-- yfinance  
+- yfinance
+- OpenAI API
 
 ---
 
@@ -109,3 +136,8 @@ Compared to a SPY buy-and-hold benchmark:
 ```bash
 pip install -r requirements.txt
 streamlit run hmm_rolling.py
+
+Create a `.streamlit/secrets.toml` file in the project root with:
+```toml
+OPENAI_API_KEY = "your-openai-api-key"
+```

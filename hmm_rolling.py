@@ -16,7 +16,7 @@ import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
 from sklearn.covariance import LedoitWolf
 import matplotlib.pyplot as plt
-import anthropic
+from openai import OpenAI
 import json
 
 st.title("📊 Regime-Based Portfolio Dashboard")
@@ -445,7 +445,7 @@ bull_segments = sorted(
 # =========================
 # AI Portfolio Commentary + Regime Retrospective
 # =========================
-client = anthropic.Anthropic(api_key=st.secrets["OPENAI_API_KEY"])
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = """You are a portfolio analytics assistant. You must ONLY use
 the structured data provided to you. Never assume external market knowledge,
@@ -475,13 +475,15 @@ LONGEST BEAR REGIME SEGMENTS:
 LONGEST BULL REGIME SEGMENTS:
 {json.dumps(bull_segs, indent=2)}
 """
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
+    response = client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=700,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
     )
-    return message.content[0].text
+    return response.choices[0].message.content
 
 
 summary = {

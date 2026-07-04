@@ -16,6 +16,8 @@ import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
 from sklearn.covariance import LedoitWolf
 import matplotlib.pyplot as plt
+import anthropic
+import json
 
 st.title("📊 Regime-Based Portfolio Dashboard")
 
@@ -382,3 +384,165 @@ metrics = pd.DataFrame({
 
 st.subheader("📋 Performance Metrics")
 st.dataframe(metrics)
+
+# =========================
+# Identify Regime Segments (for AI recap)
+# =========================
+def get_regime_segments(state_series, returns_df, port_ret_series):
+    """Split the state sequence into contiguous regime segments and
+    compute return/drawdown stats for each segment."""
+    segments = []
+    current_state = state_series.iloc[0]
+    start_idx = state_series.index[0]
+
+    for i in range(1, len(state_series)):
+        if state_series.iloc[i] != current_state:
+            end_idx = state_series.index[i - 1]
+            seg_ret = port_ret_series.loc[start_idx:end_idx]
+            seg_spy = returns_df["SPY"].loc[start_idx:end_idx]
+            segments.append({
+                "regime": "Bull" if current_state == 1 else "Bear",
+                "start": str(start_idx.date()),
+                "end": str(end_idx.date()),
+                "days": len(seg_ret),
+                "portfolio_return_pct": float(np.expm1(seg_ret.sum()) * 100),
+                "spy_return_pct": float(np.expm1(seg_spy.sum()) * 100),
+                "portfolio_max_dd_pct": float(max_dd(np.exp(seg_ret.cumsum())) * 100),
+            })
+            current_state = state_series.iloc[i]
+            start_idx = state_series.index[i]
+
+    # Final segment (loop doesn't capture the last one)
+    end_idx = state_series.index[-1]
+    seg_ret = port_ret_series.loc[start_idx:end_idx]
+    seg_spy = returns_df["SPY"].loc[start_idx:end_idx]
+    segments.append({
+        "regime": "Bull" if current_state == 1 else "Bear",
+        "start": str(start_idx.date()),
+        "end": str(end_idx.date()),
+        "days": len(seg_ret),
+        "portfolio_return_pct": float(np.expm1(seg_ret.sum()) * 100),
+        "spy_return_pct": float(np.expm1(seg_spy.sum()) * 100),
+        "portfolio_max_dd_pct": float(max_dd(np.exp(seg_ret.cumsum())) * 100),
+    })
+    return segments
+
+
+all_segments = get_regime_segments(returns["state"], returns, port_ret)
+
+# Keep only the 5 longest bull and 5 longest bear segments to avoid
+# an overly long / noisy prompt
+bear_segments = sorted(
+    [s for s in all_segments if s["regime"] == "Bear"],
+    key=lambda x: x["days"], reverse=True
+)[:5]
+bull_segments = sorted(
+    [s for s in all_segments if s["regime"] == "Bull"],
+    key=lambda x: x["days"], reverse=True
+)[:5]
+
+
+# =========================
+# AI Portfolio Commentary + Regime Retrospective
+# =========================
+client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+
+SYSTEM_PROMPT = """You are a portfolio analytics assistant. You must ONLY use
+the structured data provided to you. Never assume external market knowledge,
+never speculate about causes not evidenced in the data, and never give
+investment advice or recommendations to buy/sell/hold. If data is insufficient
+to answer something, say so explicitly."""
+
+
+@st.cache_data(show_spinner=False)
+def generate_full_report(summary_dict, bull_segs, bear_segs):
+    prompt = f"""Based on the data below, write two sections:
+
+1. **Current Snapshot** (~120 words): current regime, how portfolio Sharpe/
+drawdown compares to SPY buy-and-hold, any weight concentration risk, one caveat.
+
+2. **Regime Retrospective** (~150 words): compare how the portfolio performed
+during the longest bear-market periods vs the longest bull-market periods
+listed below. Note any pattern (e.g. did the portfolio protect capital better
+in bear regimes than SPY did?).
+
+CURRENT SUMMARY:
+{json.dumps(summary_dict, indent=2, default=str)}
+
+LONGEST BEAR REGIME SEGMENTS:
+{json.dumps(bear_segs, indent=2)}
+
+LONGEST BULL REGIME SEGMENTS:
+{json.dumps(bull_segs, indent=2)}
+"""
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=700,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
+
+
+summary = {
+    "current_regime": "Bull" if returns["state"].iloc[-1] == 1 else "Bear",
+    "portfolio_metrics": metrics.set_index("Metric")["Portfolio"].to_dict(),
+    "spy_metrics": metrics.set_index("Metric")["SPY"].to_dict(),
+    "current_weights": weights.iloc[-1].round(3).to_dict(),
+    "avg_turnover": float(turnover_series.mean()),
+    "regime_bull_pct": float(returns["state"].mean()),
+}
+
+st.subheader("🤖 AI Portfolio Report")
+with st.spinner("Generating AI report..."):
+    report = generate_full_report(summary, bull_segments, bear_segments)
+st.markdown(report)
+st.caption(
+    "⚠️ AI-generated content is descriptive only, based solely on the data "
+    "shown above — not investment advice."
+)
+
+
+# =========================
+# Q&A about this portfolio
+# =========================
+st.subheader("💬 Ask about this portfolio")
+
+if "qa_history" not in st.session_state:
+    st.session_state.qa_history = []
+
+user_question = st.text_input(
+    "Ask a question about the current results "
+    "(e.g. 'why is the drawdown so large?')"
+)
+ask_btn = st.button("Ask")
+
+if ask_btn and user_question.strip():
+    qa_context = f"""
+CURRENT SUMMARY:
+{json.dumps(summary, indent=2, default=str)}
+
+BEAR SEGMENTS:
+{json.dumps(bear_segments, indent=2)}
+
+BULL SEGMENTS:
+{json.dumps(bull_segments, indent=2)}
+"""
+    with st.spinner("Thinking..."):
+        answer = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"{qa_context}\n\nQuestion: {user_question}"
+            }]
+        ).content[0].text
+
+    st.session_state.qa_history.append((user_question, answer))
+
+# Show Q&A history, most recent first
+for q, a in reversed(st.session_state.qa_history):
+    st.markdown(f"**Q: {q}**")
+    st.markdown(a)
+    st.divider()

@@ -512,21 +512,23 @@ st.caption(
 
 
 # =========================
-# Q&A about this portfolio
+# Q&A about this portfolio (isolated fragment — won't trigger full rerun)
 # =========================
-st.subheader("💬 Ask about this portfolio")
+@st.fragment
+def qa_section(summary, bear_segments, bull_segments):
+    st.subheader("💬 Ask about this portfolio")
 
-if "qa_history" not in st.session_state:
-    st.session_state.qa_history = []
+    if "qa_history" not in st.session_state:
+        st.session_state.qa_history = []
 
-user_question = st.text_input(
-    "Ask a question about the current results "
-    "(e.g. 'why is the drawdown so large?')"
-)
-ask_btn = st.button("Ask")
+    user_question = st.text_input(
+        "Ask a question about the current results "
+        "(e.g. 'why is the drawdown so large?')"
+    )
+    ask_btn = st.button("Ask")
 
-if ask_btn and user_question.strip():
-    qa_context = f"""
+    if ask_btn and user_question.strip():
+        qa_context = f"""
 CURRENT SUMMARY:
 {json.dumps(summary, indent=2, default=str)}
 
@@ -536,21 +538,22 @@ BEAR SEGMENTS:
 BULL SEGMENTS:
 {json.dumps(bull_segments, indent=2)}
 """
-    with st.spinner("Thinking..."):
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            max_tokens=400,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"{qa_context}\n\nQuestion: {user_question}"}
-            ]
-        )
-        answer = response.choices[0].message.content
+        with st.spinner("Thinking..."):
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=400,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"{qa_context}\n\nQuestion: {user_question}"}
+                ]
+            )
+            answer = response.choices[0].message.content
 
-    st.session_state.qa_history.append((user_question, answer))
+        st.session_state.qa_history.append((user_question, answer))
 
-# Show Q&A history, most recent first
-for q, a in reversed(st.session_state.qa_history):
-    st.markdown(f"**Q: {q}**")
-    st.markdown(a)
-    st.divider()
+    for q, a in reversed(st.session_state.qa_history):
+        st.markdown(f"**Q: {q}**")
+        st.markdown(a)
+        st.divider()
+
+qa_section(summary, bear_segments, bull_segments)

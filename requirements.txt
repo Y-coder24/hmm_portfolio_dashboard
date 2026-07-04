@@ -2,6 +2,6 @@ streamlit
 numpy
 pandas
 yfinance
-hmmlearn
+hmmlearn>=0.3.0
 scikit-learn
 matplotlib

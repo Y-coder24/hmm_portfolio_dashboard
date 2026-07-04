@@ -445,7 +445,7 @@ bull_segments = sorted(
 # =========================
 # AI Portfolio Commentary + Regime Retrospective
 # =========================
-client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+client = anthropic.Anthropic(api_key=st.secrets["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = """You are a portfolio analytics assistant. You must ONLY use
 the structured data provided to you. Never assume external market knowledge,

@@ -5,4 +5,4 @@ yfinance
 hmmlearn>=0.3.0
 scikit-learn
 matplotlib
-anthropic
+openai

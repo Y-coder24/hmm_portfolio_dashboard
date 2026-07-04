@@ -531,15 +531,15 @@ BULL SEGMENTS:
 {json.dumps(bull_segments, indent=2)}
 """
     with st.spinner("Thinking..."):
-        answer = client.messages.create(
-            model="claude-sonnet-4-6",
+        response = client.chat.completions.create(
+            model="gpt-4o",
             max_tokens=400,
-            system=SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"{qa_context}\n\nQuestion: {user_question}"
-            }]
-        ).content[0].text
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"{qa_context}\n\nQuestion: {user_question}"}
+            ]
+        )
+        answer = response.choices[0].message.content
 
     st.session_state.qa_history.append((user_question, answer))
 

@@ -57,9 +57,15 @@ if len(selected) < 2:
 # =========================
 # Start Button (Trigger Execution)
 # =========================
+if "analysis_started" not in st.session_state:
+    st.session_state.analysis_started = False
+
 start = st.button("🚀 Start Analysis")
 
-if not start:
+if start:
+    st.session_state.analysis_started = True
+
+if not st.session_state.analysis_started:
     st.info("Please select ETFs and click Start")
     st.stop()
 

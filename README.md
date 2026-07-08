@@ -1,6 +1,6 @@
 # 📊 Regime-Based Portfolio Dashboard
 
-Live Demo: https://hmmportfoliodashboard-zhgvarn4hxnczxi3ks8qy8.streamlit.app/
+Live Demo: [https://hmmportfoliodashboard-zhgvarn4hxnczxi3ks8qy8.streamlit.app/](https://hmmportfoliodashboard-wn9zo2mqzafpekklffbojx.streamlit.app/)
 
 ---
 

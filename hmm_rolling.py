@@ -5,8 +5,8 @@
 
 # This project implements a regime-based portfolio allocation system:
 # 1. Detect market regimes (bull vs bear) using HMM on SPY data
-# 2. Estimate expected returns conditional on market regime
-# 3. Apply mean-variance optimization (MVO) for asset allocation
+# 2. Estimate expected returns / covariance conditional on market regime
+# 3. Apply Mean-Variance Optimization (MVO) and/or Risk Parity (RP) for allocation
 # 4. Visualize performance, regimes, and portfolio behavior
 
 import streamlit as st
@@ -15,6 +15,7 @@ import pandas as pd
 import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
 from sklearn.covariance import LedoitWolf
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 from openai import OpenAI
 import json
@@ -30,7 +31,8 @@ st.markdown("""
 - Walk-forward training (expanding window)
 - Retrained every 21 trading days
 - Cached to avoid recomputation
-- Portfolio optimized conditional on regime
+- Portfolio optimized conditional on regime (MVO and/or Risk Parity)
+- Covariance estimated with Ledoit-Wolf shrinkage, conditional on regime when enough samples exist
 """)
 
 # =========================
@@ -55,6 +57,22 @@ if len(selected) < 2:
     st.stop()
 
 # =========================
+# Allocation Method Selector
+# =========================
+alloc_method = st.selectbox(
+    "Allocation Method",
+    ["Regime MVO", "Regime Risk Parity", "Blend (50/50)"],
+    help=(
+        "Regime MVO: mean-variance optimization using regime-conditional mean & covariance.\n"
+        "Regime Risk Parity: equal risk contribution weights using regime-conditional covariance "
+        "(ignores expected returns, so it is less sensitive to noisy mean estimates).\n"
+        "Blend: 50/50 average of the two weight vectors."
+    )
+)
+
+weight_cap = st.slider("Max weight per asset", 0.1, 1.0, 0.4, 0.05)
+
+# =========================
 # Start Button (Trigger Execution)
 # =========================
 if "analysis_started" not in st.session_state:
@@ -66,7 +84,7 @@ if start:
     st.session_state.analysis_started = True
 
 if not st.session_state.analysis_started:
-    st.info("Please select ETFs and click Start")
+    st.info("Please select ETFs, choose an allocation method, and click Start")
     st.stop()
 
 # =========================
@@ -192,7 +210,12 @@ states = states.loc[common_index]
 
 returns["state"] = states
 
-def get_weights(mu_vec, cov):
+# =========================
+# Weight Solvers
+# =========================
+
+def get_weights(mu_vec, cov, w_bounds=(0.0, 1.0)):
+    """Analytic MVO-style solution: w ∝ inv(Σ) @ μ, clipped to be long-only."""
     inv_cov = np.linalg.pinv(cov)
     w = inv_cov @ mu_vec
 
@@ -204,11 +227,75 @@ def get_weights(mu_vec, cov):
     return w / w.sum()
 
 
+def get_risk_parity_weights(cov, w_bounds=(0.0, 0.4)):
+    """Equal Risk Contribution (ERC) weights given a covariance matrix.
+
+    Solves for weights such that each asset contributes equally to total
+    portfolio variance, subject to long-only + upper bound constraints.
+    """
+    n = cov.shape[0]
+
+    # Guard against degenerate covariance matrices
+    if not np.all(np.isfinite(cov)):
+        return np.ones(n) / n
+
+    def risk_contributions(w):
+        w = w.reshape(-1, 1)
+        port_var = float(w.T @ cov @ w)
+        if port_var <= 0:
+            return np.zeros(n)
+        marginal = cov @ w
+        rc = (w * marginal / np.sqrt(port_var)).flatten()
+        return rc
+
+    def objective(w):
+        rc = risk_contributions(w)
+        target = rc.mean()
+        return float(np.sum((rc - target) ** 2))
+
+    w0 = np.ones(n) / n
+    bounds = [w_bounds] * n
+    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+
+    try:
+        res = minimize(
+            objective, w0, method="SLSQP",
+            bounds=bounds, constraints=constraints,
+            options={"maxiter": 300, "ftol": 1e-9}
+        )
+        if res.success and not np.isnan(res.x).any():
+            return res.x
+    except Exception:
+        pass
+
+    return w0  # fallback: equal weight
+
+
+def get_regime_cov(hist_state, hist_full, cols, min_samples=30):
+    """Ledoit-Wolf shrinkage covariance.
+
+    Prefers regime-filtered data if there are enough samples in that regime,
+    otherwise falls back to the full rolling window (same behavior as the
+    mean estimate's fallback, for consistency).
+    """
+    if len(hist_state) >= min_samples:
+        data = hist_state[cols].values
+    else:
+        data = hist_full[cols].values
+
+    try:
+        lw = LedoitWolf().fit(data)
+        cov = lw.covariance_
+    except Exception:
+        # Fallback to sample covariance if shrinkage fitting fails
+        # (e.g. too few rows)
+        cov = np.cov(hist_full[cols].values.T)
+
+    return cov
+
+
 # =========================
-# Mean-Variance Optimization (MVO)
-# =========================
-# =========================
-# Mean-Variance Optimization (No Look-Ahead)
+# Rolling Allocation (No Look-Ahead)
 # =========================
 # Use rolling / expanding window to ensure only past data is used
 
@@ -216,6 +303,8 @@ window = 252
 cost_rate = 0.001
 
 weights = []
+weights_mvo_list = []
+weights_rp_list = []
 valid_index = []
 prev_w = np.ones(len(selected)) / len(selected)
 
@@ -226,29 +315,40 @@ for i in range(window, len(returns)):
     hist = returns.iloc[i-window:i]
     state = returns["state"].iloc[i]
 
-    # 同状态历史
+    # Regime-filtered history (used for mean AND, when sufficient, covariance)
     hist_state = hist[hist["state"] == state]
     if len(hist_state) < 20:
         hist_state = hist
 
-    # μ（降噪）
+    # Regime-conditional shrinkage covariance (shared by both methods)
+    cov_mat = get_regime_cov(hist_state, hist, selected, min_samples=30)
+
+    # ---- Regime MVO ----
     mu_vec = hist_state[selected].mean().values
-    mu_vec = mu_vec * 0.5
+    mu_vec = mu_vec * 0.5  # noise dampening
+    w_mvo = get_weights(mu_vec, cov_mat)
 
-    # Σ
-    cov_mat = np.cov(hist[selected].T)
+    # ---- Regime Risk Parity ----
+    w_rp = get_risk_parity_weights(cov_mat, w_bounds=(0.0, weight_cap))
 
-    # MVO
-    w = get_weights(mu_vec, cov_mat)
+    weights_mvo_list.append(w_mvo)
+    weights_rp_list.append(w_rp)
 
-    # fallback（关键）
+    if alloc_method == "Regime MVO":
+        w = w_mvo
+    elif alloc_method == "Regime Risk Parity":
+        w = w_rp
+    else:  # Blend
+        w = 0.5 * w_mvo + 0.5 * w_rp
+
+    # fallback (critical)
     if np.isnan(w).any() or np.isinf(w).any():
         w = prev_w
 
     # weight cap
-    w = np.clip(w, 0, 0.4)
+    w = np.clip(w, 0, weight_cap)
 
-    # normalization（安全）
+    # normalization (safety)
     if w.sum() == 0:
         w = prev_w
     else:
@@ -268,6 +368,8 @@ for i in range(window, len(returns)):
 
 # DataFrame
 weights = pd.DataFrame(weights, index=valid_index, columns=selected)
+weights_mvo_df = pd.DataFrame(weights_mvo_list, index=valid_index, columns=selected)
+weights_rp_df = pd.DataFrame(weights_rp_list, index=valid_index, columns=selected)
 
 # clean
 weights = weights.clip(lower=0)
@@ -285,7 +387,7 @@ turnover_series = pd.Series(turnover_list, index=valid_index)
 # =========================
 gross_ret = (weights * returns[selected]).sum(axis=1)
 
-# 交易成本（滞后一日）
+# Trading cost (lagged one day)
 cost = turnover_series * cost_rate
 
 net_ret = gross_ret - cost
@@ -301,13 +403,35 @@ bh_cum = np.exp(bh_ret.cumsum())
 # =========================
 fig, ax = plt.subplots(figsize=(12,6))
 
-ax.plot(port_cum, label="Portfolio")
+ax.plot(port_cum, label=f"Portfolio ({alloc_method})")
 ax.plot(bh_cum, label="SPY (BH)", linestyle="--")
 
 ax.set_title("Cumulative Return")
 ax.legend()
 
 st.pyplot(fig)
+
+# =========================
+# Plot 1b: MVO vs Risk Parity vs Blend comparison (informational)
+# =========================
+st.subheader("⚖️ Method Comparison (informational, not traded simultaneously)")
+
+def quick_backtest(w_df, ret_df, sel, cost_rate_):
+    """Cheap comparison backtest: same smoothing/cap already applied upstream
+    is NOT reapplied here — this uses the raw per-method weights directly,
+    so it's a rough comparison, not identical to the live-traded series."""
+    turn = w_df.diff().abs().sum(axis=1).fillna(0)
+    g = (w_df * ret_df[sel]).sum(axis=1)
+    n = g - turn * cost_rate_
+    return np.exp(n.cumsum())
+
+cmp_fig, cmp_ax = plt.subplots(figsize=(12, 5))
+cmp_ax.plot(quick_backtest(weights_mvo_df, returns, selected, cost_rate), label="Regime MVO")
+cmp_ax.plot(quick_backtest(weights_rp_df, returns, selected, cost_rate), label="Regime Risk Parity")
+cmp_ax.plot(bh_cum, label="SPY (BH)", linestyle="--", color="gray")
+cmp_ax.set_title("Regime MVO vs Regime Risk Parity vs SPY (unsmoothed weights)")
+cmp_ax.legend()
+st.pyplot(cmp_fig)
 
 # =========================
 # Plot 2: SPY Price + Regime
@@ -341,7 +465,7 @@ st.pyplot(fig3)
 # =========================
 # Portfolio Weights
 # =========================
-st.subheader("📊 Portfolio Weights")
+st.subheader(f"📊 Portfolio Weights Over Time ({alloc_method})")
 fig_w, ax_w = plt.subplots(figsize=(12,6))
 
 ax_w.stackplot(
@@ -464,8 +588,9 @@ to answer something, say so explicitly."""
 def generate_full_report(summary_dict, bull_segs, bear_segs):
     prompt = f"""Based on the data below, write two sections:
 
-1. **Current Snapshot** (~120 words): current regime, how portfolio Sharpe/
-drawdown compares to SPY buy-and-hold, any weight concentration risk, one caveat.
+1. **Current Snapshot** (~120 words): current regime, current allocation
+method, how portfolio Sharpe/drawdown compares to SPY buy-and-hold, any
+weight concentration risk, one caveat.
 
 2. **Regime Retrospective** (~150 words): compare how the portfolio performed
 during the longest bear-market periods vs the longest bull-market periods
@@ -493,6 +618,8 @@ LONGEST BULL REGIME SEGMENTS:
 
 
 summary = {
+    "allocation_method": alloc_method,
+    "weight_cap": weight_cap,
     "current_regime": "Bull" if returns["state"].iloc[-1] == 1 else "Bear",
     "portfolio_metrics": metrics.set_index("Metric")["Portfolio"].to_dict(),
     "spy_metrics": metrics.set_index("Metric")["SPY"].to_dict(),
